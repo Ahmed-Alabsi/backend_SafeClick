@@ -1,13 +1,13 @@
 # apps/scans/admin.py
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import ScanResult, Blacklist
+from .models import Scan, Blacklist
 
-@admin.register(ScanResult)
-class ScanResultAdmin(admin.ModelAdmin):
+@admin.register(Scan)
+class ScanAdmin(admin.ModelAdmin):
     list_display = [
         'id_short',
-        'link_short',
+        'url_short',
         'status_colored',
         'score_colored',
         'user_email',
@@ -15,18 +15,18 @@ class ScanResultAdmin(admin.ModelAdmin):
         'threats_badge'
     ]
     
-    list_filter = ['safe', 'timestamp', 'user']
-    search_fields = ['link', 'domain', 'user__email']
+    list_filter = ['safe', 'created_at', 'user']
+    search_fields = ['url', 'domain', 'user__email']
     list_per_page = 25
-    ordering = ['-timestamp']
+    ordering = ['-created_at']
     
     def id_short(self, obj):
         return str(obj.id)[:8] + '...'
     id_short.short_description = 'المعرف'
     
-    def link_short(self, obj):
-        return obj.link[:50] + '...' if len(obj.link) > 50 else obj.link
-    link_short.short_description = 'الرابط'
+    def url_short(self, obj):
+        return obj.url[:50] + '...' if len(obj.url) > 50 else obj.url
+    url_short.short_description = 'الرابط'
     
     def status_colored(self, obj):
         if obj.safe == True:
@@ -38,8 +38,8 @@ class ScanResultAdmin(admin.ModelAdmin):
     status_colored.short_description = 'الحالة'
     
     def score_colored(self, obj):
-        color = 'green' if obj.score >= 70 else 'orange' if obj.score >= 40 else 'red'
-        return format_html('<span style="color: {}; font-weight: bold;">{}%</span>', color, obj.score)
+        color = 'green' if obj.risk_score >= 70 else 'orange' if obj.risk_score >= 40 else 'red'
+        return format_html('<span style="color: {}; font-weight: bold;">{}%</span>', color, obj.risk_score)
     score_colored.short_description = 'النتيجة'
     
     def user_email(self, obj):
@@ -47,7 +47,7 @@ class ScanResultAdmin(admin.ModelAdmin):
     user_email.short_description = 'المستخدم'
     
     def timestamp_display(self, obj):
-        return obj.timestamp.strftime('%Y-%m-%d %H:%M')
+        return obj.created_at.strftime('%Y-%m-%d %H:%M')
     timestamp_display.short_description = 'التاريخ'
     
     def threats_badge(self, obj):
@@ -56,7 +56,7 @@ class ScanResultAdmin(admin.ModelAdmin):
         return '✅'
     threats_badge.short_description = 'التهديدات'
     
-    readonly_fields = ['id', 'timestamp', 'updated_at']
+    readonly_fields = ['id', 'created_at', 'updated_at']
 
 
 @admin.register(Blacklist)

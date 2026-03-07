@@ -26,14 +26,8 @@ class CreateReportSerializer(serializers.ModelSerializer):
         fields = ['link', 'category', 'description', 'severity', 'is_anonymous']
     
     def validate_link(self, value):
-        # التحقق من صحة الرابط
-        import re
-        url_pattern = re.compile(
-            r'^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$'
-        )
-        if not url_pattern.match(value):
-            raise serializers.ValidationError('الرابط غير صحيح')
-        return value
+        from apps.common.url_validator import validate_safe_url
+        return validate_safe_url(value)
 
 class ReportDetailSerializer(serializers.ModelSerializer):
     comments = serializers.SerializerMethodField()

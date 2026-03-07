@@ -1,14 +1,14 @@
 # apps/scans/serializers.py
 from rest_framework import serializers
-from .models import ScanResult
+from .models import Scan
 
 class ScanResultSerializer(serializers.ModelSerializer):
     class Meta:
-        model = ScanResult
+        model = Scan
         fields = [
-            'id', 'link', 'domain', 'ip_address',
-            'safe', 'score', 'details', 'threats_found',
-            'threats_count', 'response_time', 'server_info', 'timestamp'
+            'id', 'url', 'url_hash', 'domain', 'ip_address',
+            'safe', 'score', 'risk_score', 'result', 'details', 'threats_found',
+            'threats_count', 'response_time', 'server_info', 'created_at', 'timestamp'
         ]
     
     def to_representation(self, instance):
@@ -35,8 +35,6 @@ class ScanResultSerializer(serializers.ModelSerializer):
 
 class ScanLinkSerializer(serializers.Serializer):
     link = serializers.URLField(required=True)
-    
     def validate_link(self, value):
-        if not value.startswith(('http://', 'https://')):
-            value = 'https://' + value
-        return value
+        from apps.common.url_validator import validate_safe_url
+        return validate_safe_url(value)

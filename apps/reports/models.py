@@ -67,6 +67,14 @@ class Report(models.Model):
     
     def __str__(self):
         return f"{self.tracking_number or 'بلاغ'} - {self.link[:50]}"
+        
+    @property
+    def url(self):
+        return self.link
+        
+    @property
+    def reason(self):
+        return self.category
     
     def save(self, *args, **kwargs):
         if not self.tracking_number:

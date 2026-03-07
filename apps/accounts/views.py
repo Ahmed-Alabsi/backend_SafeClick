@@ -88,16 +88,7 @@ class LogoutView(APIView):
                 'message': 'تم تسجيل الخروج'
             })
         
-class LogoutView(APIView):
-    permission_classes = [IsAuthenticated]
-    
-    def post(self, request):
-        # فقط ارجع رسالة نجاح - العميل سيمسح التوكن محلياً
-        return Response({
-            'success': True,
-            'message': 'تم تسجيل الخروج بنجاح'
-        })
-            
+
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]

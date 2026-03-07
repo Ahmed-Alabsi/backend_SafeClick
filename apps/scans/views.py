@@ -3,59 +3,46 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from .models import ScanResult
+from .models import Scan
 from .serializers import ScanResultSerializer, ScanLinkSerializer
-from .threat_detection import ThreatDetector
+from services.url_scan_service import scan_url
 import logging
 
 logger = logging.getLogger(__name__)
 
 class ScanLinkView(APIView):
-    """فحص رابط جديد"""
-    permission_classes = [AllowAny]  # مؤقتاً للتطوير
-    
+    """فحص رابط جديد — Phase 5: Authentication Required."""
+    permission_classes = [IsAuthenticated]  # Anonymous access disabled
+    throttle_scope = 'scan'  # 10/min per user defined in settings
+
     def post(self, request):
-        print("\n" + "="*60)
-        print("🔵 [SCAN] طلب فحص رابط جديد")
-        print("="*60)
+        logger.info("[SCAN] طلب فحص رابط من: %s", request.user.email)
         
         serializer = ScanLinkSerializer(data=request.data)
         
         if serializer.is_valid():
             link = serializer.validated_data['link']
-            print(f"🔗 الرابط: {link}")
-            print(f"👤 المستخدم: {request.user.email if request.user.is_authenticated else 'غير مسجل'}")
-            
+            logger.info("[SCAN] الرابط: %s", link)
+
             try:
-                # فحص الرابط
-                print("🔄 جاري فحص الرابط...")
-                detector = ThreatDetector()
-                result = detector.detect(link)
+                user = request.user
+                service_result = scan_url(link, user)
                 
-                print(f"✅ نتيجة الفحص: {result.get('score')}% - {result.get('final_status')}")
-                
-                # حفظ النتيجة
-                scan_result = ScanResult(
-                    user=request.user if request.user.is_authenticated else None,
-                    link=link,
-                    domain=result.get('domain'),
-                    ip_address=result.get('ip_address'),
-                    safe=result.get('safe'),
-                    score=result.get('score', 0),
-                    details=result.get('details', []),
-                    threats_found=result.get('threats_found', []),
-                    threats_count=result.get('threats_count', 0),
-                    response_time=result.get('response_time', 0),
-                    server_info=result.get('server_info')
-                )
-                
-                scan_result.save()
-                print(f"💾 تم الحفظ برقم: {scan_result.id}")
-                
-                # تجهيز الرد
-                response_data = ScanResultSerializer(scan_result).data
-                response_data['final_status'] = result.get('final_status')
-                response_data['final_message'] = result.get('final_message')
+                logger.info("[SCAN] نتيجة: %s%%  %s", service_result.get('risk_score'), service_result.get('result'))
+                response_data = {
+                    'url': service_result.get('url'),
+                    'result': service_result.get('result'),
+                    'risk_score': service_result.get('risk_score'),
+                    'scanned_at': service_result.get('scanned_at'),
+                    
+                    # Legacy fallback fields
+                    'safe': service_result.get('safe'),
+                    'score': service_result.get('score'),
+                    'domain': service_result.get('domain'),
+                    'final_status': service_result.get('final_status'),
+                    'final_message': service_result.get('final_message'),
+                    'details': service_result.get('details', [])
+                }
                 
                 return Response({
                     'success': True,
@@ -76,15 +63,21 @@ class ScanLinkView(APIView):
 
 
 class ScanHistoryView(APIView):
-    """عرض سجل الفحوصات"""
+    """عرض سجل الفحوصات — Phase 3: optimized query"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
-        scans = ScanResult.objects.filter(user=request.user).order_by('-timestamp')
+        # Use .only() to avoid loading heavy JSON fields; limit to 50 most recent.
+        scans = (
+            Scan.objects
+            .filter(user=request.user)
+            .only('id', 'url', 'result', 'safe', 'risk_score', 'created_at', 'domain', 'threats_count')
+            .order_by('-created_at')[:50]
+        )
         serializer = ScanResultSerializer(scans, many=True)
-        
+        data = serializer.data
         return Response({
             'success': True,
-            'history': serializer.data,
-            'count': scans.count()
+            'history': data,
+            'count': len(data),
         })
