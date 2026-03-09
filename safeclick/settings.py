@@ -206,8 +206,8 @@ DEFAULT_CHARSET = 'utf-8'
 
 # ========== JWT Settings ==========
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),   # Phase 5: 1h (was 24h)
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=30),      # 30 يوم بدلاً من ساعة
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=60),     # 60 يوم بدلاً من 7 أيام
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'ALGORITHM': 'HS256',
@@ -215,6 +215,11 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
+    
+    # إضافات مهمة لتجربة المستخدم
+    'UPDATE_LAST_LOGIN': True,           # تحديث آخر دخول مع كل طلب
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
 }
 
 # ========== CORS Settings ==========
