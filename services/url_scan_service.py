@@ -66,12 +66,6 @@ def scan_url(url, user=None):
     cache_key = f"scan_cache:{url_hash}"
     lock_key = f"scan_lock:{url_hash}"
 
-    # ── L1: Redis Cache (TEMPORARILY DISABLED) ─────────────────────────
-    # cached_data_str = cache.get(cache_key)
-    # if cached_data_str:
-    #     logger.info(f"[CACHE-L1] Redis hit for {url_hash[:16]}")
-    #     return json.loads(cached_data_str)
-
     # ── Distributed lock (max 2s wait) ──────────────────────────────────────
     lock_acquired = False
     max_retries = int(LOCK_MAX_WAIT_S / LOCK_POLL_INTERVAL)
@@ -80,22 +74,15 @@ def scan_url(url, user=None):
         if cache.add(lock_key, "locked", LOCK_TTL):
             lock_acquired = True
             break
-        # Re-check Redis while waiting
+        # Wait and retry
         time.sleep(LOCK_POLL_INTERVAL)
-        # cached_data_str = cache.get(cache_key)
-        # if cached_data_str:
-        #     logger.info(f"[CACHE-L1] Redis hit (after lock wait) for {url_hash[:16]}")
-        #     return json.loads(cached_data_str)
 
     # If lock not acquired within 2s, proceed anyway (avoid deadlock)
     if not lock_acquired:
         logger.warning(f"[LOCK] Could not acquire lock for {url_hash[:16]} — proceeding without lock")
 
     try:
-        # ── L2: UrlCache Table & L3 DB (TEMPORARILY DISABLED) ─────────
-        # Disabled to force full fresh scans always.
-
-        # ── L4: External ThreatDetector ────────────────────────────────────────
+        # ── External ThreatDetector ────────────────────────────────────────
         logger.info(f"[SCAN] Calling external ThreatDetector for {url_hash[:16]}")
         detector = ThreatDetector()
         vt_result = detector.detect(normalized_url)
@@ -145,6 +132,20 @@ def scan_url(url, user=None):
                 last_result=status_text,
                 threat_score=risk_score,
             )
+
+        # ── Update User Stats ───────────────────────────────────────────────────
+        if user and user.is_authenticated:
+            try:
+                # Increment total scanned links
+                user.scanned_links = F('scanned_links') + 1
+                
+                # Increment detected threats if not safe
+                if not safe_status:
+                    user.detected_threats = F('detected_threats') + 1
+                    
+                user.save(update_fields=['scanned_links', 'detected_threats'])
+            except Exception as e:
+                logger.error(f"[STATS] Failed to update user stats for {user.email}: {e}")
 
         # ── Write UrlCache (L2) ─────────────────────────────────────────────────
         try:

@@ -191,6 +191,7 @@ class ReportCommentAdmin(admin.ModelAdmin):
     list_display = ['report_tracking', 'user_name', 'content_short', 'is_internal', 'created_at']
     list_filter = ['is_internal', 'created_at']
     search_fields = ['content', 'report__tracking_number', 'user__email']
+    list_per_page = 20
     
     @admin.display(description='البلاغ')
     def report_tracking(self, obj):
