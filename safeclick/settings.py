@@ -88,7 +88,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.getenv('safeclick_db', 'safeclick_db'),
         'USER': os.getenv('safeclick_user', 'safeclick_user'),
-        'PASSWORD': os.getenv('salah', 'salah'),
+        'PASSWORD': os.getenv('123456', '123456'),
         'HOST': os.getenv('localhost', 'localhost'),
         'PORT': os.getenv('5432', '5432'),
     }
