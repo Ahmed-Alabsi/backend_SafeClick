@@ -13,6 +13,8 @@ from .serializers import (
     UpdateReportStatusSerializer, ReportCommentSerializer
 )
 from apps.scans.models import Blacklist
+from django.db.models import Count, Avg
+from django.db.models.functions import TruncDate, TruncMonth
 
 logger = logging.getLogger(__name__)
 
@@ -245,9 +247,6 @@ class ReportStatsView(APIView):
                 'success': False,
                 'message': 'غير مصرح لك بهذا الإجراء'
             }, status=status.HTTP_403_FORBIDDEN)
-        
-        from django.db.models import Count, Avg
-        from django.db.models.functions import TruncDate, TruncMonth
         
         reports = Report.objects.all()
         

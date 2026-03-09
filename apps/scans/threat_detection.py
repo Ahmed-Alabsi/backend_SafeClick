@@ -359,10 +359,30 @@ class ThreatDetector:
 
         base_score = 100
 
-        if threat_count > 0:
-            base_score -= min(90, total_severity * 6)
+        # Check for critical threats (VirusTotal malicious, Google Safe Browsing, Blacklist)
+        has_critical_threat = any(
+            t.get('type') in ['virustotal', 'google_safe', 'blacklist'] and t.get('severity', 0) >= 5
+            for t in self.results['threats_found']
+        )
+        
+        # Check for suspicious but non-critical threats
+        has_suspicious_threat = any(
+            t.get('type') == 'virustotal' and t.get('suspicious', 0) > 0 and t.get('malicious', 0) == 0
+            for t in self.results['threats_found']
+        )
 
-        final_score = max(0, min(100, base_score - self.results['score']))
+        if threat_count > 0:
+            # More aggressive penalty: severity * 10
+            base_score -= min(90, total_severity * 10)
+
+        final_score = max(0, min(100, base_score - self.results.get('score', 0)))
+        
+        # Hard limits based on threat type to prevent incorrect categorization
+        if has_critical_threat:
+            final_score = min(final_score, 35) # Force into "Dangerous" category (< 40)
+        elif has_suspicious_threat:
+            final_score = min(final_score, 65) # Force into "Suspicious" category (< 70)
+
         self.results['score'] = final_score
 
         if final_score >= 70:
