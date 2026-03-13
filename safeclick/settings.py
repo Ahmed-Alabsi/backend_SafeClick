@@ -89,44 +89,51 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.getenv('safeclick_db', 'safeclick_db'),
         'USER': os.getenv('safeclick_user', 'safeclick_user'),
-        'PASSWORD': os.getenv('123456', '123456'),
+        'PASSWORD': os.getenv('salah', 'salah'),
         'HOST': os.getenv('localhost', 'localhost'),
         'PORT': os.getenv('5432', '5432'),
     }
 }
 
 # ========== التخزين المؤقت (Redis) ==========
-REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/1')
+# REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/1')
 
-# Redis cache with in-process fallback when Redis is unavailable
-try:
-    import django_redis
-    import redis
-    
-    # Try to ping the Redis server rapidly to see if it's actually alive
-    redis_test_client = redis.Redis.from_url(REDIS_URL, socket_connect_timeout=0.2)
-    redis_test_client.ping()
-    
-    CACHES = {
-        "default": {
-            "BACKEND": "django_redis.cache.RedisCache",
-            "LOCATION": REDIS_URL,
-            "OPTIONS": {
-                "CLIENT_CLASS": "django_redis.client.DefaultClient",
-                "IGNORE_EXCEPTIONS": True,
-                "SOCKET_CONNECT_TIMEOUT": 2,
-                "SOCKET_TIMEOUT": 2,
-            }
-        }
+# Redis cache disabled temporarily as per user request
+# try:
+#     import django_redis
+#     import redis
+#     
+#     # Try to ping the Redis server rapidly to see if it's actually alive
+#     redis_test_client = redis.Redis.from_url(REDIS_URL, socket_connect_timeout=0.2)
+#     redis_test_client.ping()
+#     
+#     CACHES = {
+#         "default": {
+#             "BACKEND": "django_redis.cache.RedisCache",
+#             "LOCATION": REDIS_URL,
+#             "OPTIONS": {
+#                 "CLIENT_CLASS": "django_redis.client.DefaultClient",
+#                 "IGNORE_EXCEPTIONS": True,
+#                 "SOCKET_CONNECT_TIMEOUT": 2,
+#                 "SOCKET_TIMEOUT": 2,
+#             }
+#         }
+#     }
+# except (ImportError, redis.exceptions.ConnectionError, redis.exceptions.TimeoutError, Exception) as e:
+#     # Redis not installed OR server is down — use in-memory cache
+#     print(f"ℹ️ [Cache] Redis unavailable ({str(e).split()[0]}). Falling back to LocMemCache.")
+#     CACHES = {
+#         "default": {
+#             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+#         }
+#     }
+
+# Use LocMemCache as default
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
     }
-except (ImportError, redis.exceptions.ConnectionError, redis.exceptions.TimeoutError, Exception) as e:
-    # Redis not installed OR server is down — use in-memory cache
-    print(f"ℹ️ [Cache] Redis unavailable ({str(e).split()[0]}). Falling back to LocMemCache.")
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        }
-    }
+}
 
 # ========== التحقق من كلمة المرور ==========
 AUTH_PASSWORD_VALIDATORS = [

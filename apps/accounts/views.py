@@ -6,12 +6,12 @@ from django.contrib.auth import authenticate
 from django.core.mail import EmailMessage
 from django.utils import timezone
 from django.utils.crypto import get_random_string
-from rest_framework import status
+from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from .models import User, EmailVerification, IPAttempt
 from .serializers import (
@@ -339,7 +339,7 @@ class LoginView(APIView):
 
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]
-    parser_classes = (MultiPartParser, FormParser)
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
 
     def get(self, request):
         serializer = UserSerializer(request.user)
