@@ -254,6 +254,7 @@ CSRF_TRUSTED_ORIGINS = [
 # ========== API Keys ==========
 VIRUSTOTAL_API_KEY = os.getenv('VIRUSTOTAL_API_KEY', '')
 GOOGLE_SAFE_BROWSING_API_KEY = os.getenv('GOOGLE_SAFE_BROWSING_API_KEY', '')
+GOOGLE_WEB_CLIENT_ID = os.getenv('GOOGLE_WEB_CLIENT_ID', '')
 
 # ========== Email Settings (Gmail SMTP) ==========
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

@@ -12,6 +12,9 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.conf import settings
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 from .models import User, EmailVerification, IPAttempt
 from .serializers import (
@@ -462,3 +465,86 @@ class ResetPasswordView(APIView):
             
         except (EmailVerification.DoesNotExist, User.DoesNotExist):
              return Response({'success': False, 'message': 'خطأ في عملية التحقق'}, status=status.HTTP_400_BAD_REQUEST)
+
+class GoogleLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        token = request.data.get('id_token')
+        ip = get_client_ip(request)
+        ip_count = track_ip_attempt(ip)
+        
+        # Rate Limiting
+        if ip_count > 15:
+            logger.warning(f"Google Login Rate limit exceeded: {ip}")
+            return Response({
+                'success': False,
+                'message': 'كثير من المحاولات من هذا الجهاز، يرجى الانتظار.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        if not token:
+            return Response({'success': False, 'message': 'التوكن مطلوب'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Verify the token with Google
+            # Check AUD if GOOGLE_WEB_CLIENT_ID is set in settings
+            client_id = settings.GOOGLE_WEB_CLIENT_ID
+            if not client_id:
+                logger.error("GOOGLE_WEB_CLIENT_ID is not configured in settings. Skipping AUD check.")
+                idinfo = id_token.verify_oauth2_token(token, google_requests.Request())
+            else:
+                idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), client_id)
+
+            if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
+                raise ValueError('المرسل غير صالح')
+
+            email = idinfo.get('email')
+            name = idinfo.get('name')
+            
+            if not email:
+                return Response({'success': False, 'message': 'لا يمكن الحصول على البريد الإلكتروني من حساب Google'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Link account or create new
+            try:
+                user = User.objects.get(email=email)
+                logger.info(f"Google Login - Linked existing account: {email} (IP: {ip})")
+                
+                # Update email_verified if it wasn't
+                if not user.is_email_verified:
+                    user.is_email_verified = True
+                    user.save()
+                    
+            except User.DoesNotExist:
+                logger.info(f"Google Login - Created new account: {email} (IP: {ip})")
+                # Handle unique name if conflicting
+                unique_name = name
+                counter = 1
+                while User.objects.filter(name=unique_name).exists():
+                    unique_name = f"{name}_{counter}"
+                    counter += 1
+                    
+                user = User.objects.create_user(
+                    email=email,
+                    name=unique_name,
+                    password=''  # Users created via Google don't need a password initially
+                )
+                user.is_email_verified = True
+                user.save()
+
+            # Generate tokens
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                'success': True,
+                'user': UserSerializer(user).data,
+                'tokens': {
+                    'access': str(refresh.access_token),
+                    'refresh': str(refresh),
+                }
+            })
+
+        except ValueError as e:
+            logger.warning(f"Google Login Verification Failed: {e} (IP: {ip})")
+            return Response({'success': False, 'message': 'التوكن غير صالح أو منتهي الصلاحية'}, status=status.HTTP_401_UNAUTHORIZED)
+        except Exception as e:
+            logger.error(f"Google Login Error: {e} (IP: {ip})")
+            return Response({'success': False, 'message': 'حدث خطأ غير متوقع'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
