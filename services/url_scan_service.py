@@ -21,8 +21,20 @@ from apps.scans.threat_detection import ThreatDetector
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-CACHE_TTL = 86400          # 24 hours
+# ── Advanced Caching Configuration ──
+CACHE_TTL_BY_STATUS = {
+    "safe": 3600,         # 60 mins
+    "suspicious": 900,    # 15 mins
+    "malicious": 300,     # 5 mins
+    "unknown": 600        # 10 mins
+}
+
+CACHE_MULTIPLIER_BY_LEVEL = {
+    "basic": 2.0,     # Relies more heavily on cache (longer TTL)
+    "standard": 1.0,  # Standard TTL
+    "deep": 0.5       # Halves TTL for deep scans to ensure freshness
+}
+
 LOCK_TTL = 60              # Lock expires in 60s (safety valve)
 LOCK_MAX_WAIT_S = 2.0      # Max 2 seconds total wait for a lock (was 10s)
 LOCK_POLL_INTERVAL = 0.5   # Poll every 500ms
@@ -37,15 +49,12 @@ def _threat_level(score: int) -> str:
     return 'high'
 
 def normalize_url(url):
-    """Normalize URL: lowercase, strip, remove fragment and trailing slash."""
+    """Normalize URL: keep netloc and path, drop trailing slash (Advanced Optimization)."""
     url = url.strip().lower()
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
-    if '#' in url:
-        url = url.split('#')[0]
-    if url.endswith('/'):
-        url = url[:-1]
-    return url
+    parsed = urlparse(url)
+    return (parsed.netloc + parsed.path).rstrip("/")
 
 def extract_domain(url):
     """Extract base domain using tldextract."""
@@ -53,7 +62,7 @@ def extract_domain(url):
     return f"{extracted.domain}.{extracted.suffix}" if extracted.suffix else extracted.domain
 
 
-def scan_url(url, user=None):
+def scan_url(url, user=None, scan_level='deep'):
     """
     Scan a URL using multi-layer caching:
       L1 Redis → L2 UrlCache → L3 DB (recent scan) → L4 External ThreatDetector
@@ -62,9 +71,25 @@ def scan_url(url, user=None):
     """
     normalized_url = normalize_url(url)
     domain = extract_domain(normalized_url)
-    url_hash = hashlib.sha256(normalized_url.encode()).hexdigest()
+    url_hash = hashlib.sha256(f"{normalized_url}:{scan_level}".encode()).hexdigest()
     cache_key = f"scan_cache:{url_hash}"
     lock_key = f"scan_lock:{url_hash}"
+
+    # ── Check Cache (L1) ────────────────────────────────────────────────────
+    cached_result = cache.get(cache_key)
+    if cached_result:
+        try:
+            parsed = json.loads(cached_result) if isinstance(cached_result, str) else cached_result
+            
+            # Smart Cache Invalidation (Soft Refresh trigger logic can go here)
+            # For now, TTL handles expiration gracefully based on risk
+            
+            parsed['meta'] = parsed.get('meta', {})
+            parsed['meta']['cache_hit'] = True
+            logger.info(f"[CACHE-L1] HIT for {normalized_url} at level {scan_level}")
+            return parsed
+        except Exception:
+            pass
 
     # ── Distributed lock (max 2s wait) ──────────────────────────────────────
     lock_acquired = False
@@ -83,9 +108,9 @@ def scan_url(url, user=None):
 
     try:
         # ── External ThreatDetector ────────────────────────────────────────
-        logger.info(f"[SCAN] Calling external ThreatDetector for {url_hash[:16]}")
+        logger.info(f"[SCAN] Calling external ThreatDetector for {url_hash[:16]} with level {scan_level}")
         detector = ThreatDetector()
-        vt_result = detector.detect(normalized_url)
+        vt_result = detector.detect(normalized_url, scan_level)
 
         safe_status = vt_result.get('safe')
         if safe_status is True:
@@ -162,6 +187,11 @@ def scan_url(url, user=None):
         except Exception as e:
             logger.warning(f"[CACHE-L2] UrlCache write failed: {e}")
 
+        # ── Determine Dynamic TTL ──
+        ttl_base = CACHE_TTL_BY_STATUS.get(status_text, 600)
+        ttl_multiplier = CACHE_MULTIPLIER_BY_LEVEL.get(scan_level, 1.0)
+        final_ttl = int(ttl_base * ttl_multiplier)
+
         final_result = {
             "url": normalized_url,
             "result": status_text,
@@ -172,9 +202,20 @@ def scan_url(url, user=None):
             "final_status": vt_result.get('final_status'),
             "final_message": vt_result.get('final_message'),
             "domain": domain,
+            "ip_address": vt_result.get('ip_address'),
+            "threats_count": vt_result.get('threats_count', 0),
+            "response_time": vt_result.get('response_time', 0.0),
             "details": [str(d) for d in vt_result.get('details', [])],
+            "meta": {
+                "cache_hit": False,
+                "ttl": final_ttl
+            }
         }
-        cache.set(cache_key, json.dumps(final_result), timeout=CACHE_TTL)
+        
+        # Prevent Cache Pollution by not caching 'unknown' results
+        if status_text != 'unknown':
+            cache.set(cache_key, json.dumps(final_result), timeout=final_ttl)
+            
         return final_result
 
     finally:

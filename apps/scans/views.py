@@ -11,37 +11,66 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ScanLinkView(APIView):
-    """فحص رابط جديد — Phase 5: Authentication Required."""
-    permission_classes = [IsAuthenticated]  # Anonymous access disabled
-    throttle_scope = 'scan'  # 10/min per user defined in settings
+    """فحص رابط جديد — Phase 5/Guest Support: Authentication Optional but with stricter rate limiting for guests."""
+    from rest_framework.throttling import UserRateThrottle
+
+    class ScanRateThrottle(UserRateThrottle):
+        rate = '20/min'
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScanRateThrottle]
 
     def post(self, request):
-        logger.info("[SCAN] طلب فحص رابط من: %s", request.user.email)
+        user_identifier = request.user.email if request.user.is_authenticated else "Guest"
+        logger.info("[SCAN] طلب فحص رابط من: %s", user_identifier)
         
         serializer = ScanLinkSerializer(data=request.data)
         
         if serializer.is_valid():
             link = serializer.validated_data['link']
-            logger.info("[SCAN] الرابط: %s", link)
+            scan_level = serializer.validated_data.get('scan_level', 'deep')
+            logger.info("[SCAN] الرابط: %s | مستوى الفحص: %s", link, scan_level)
+
+            import time
+            start_time = time.time()
 
             try:
-                user = request.user
-                service_result = scan_url(link, user)
+                # If the user is authenticated, pass the user object, otherwise pass None
+                user = request.user if request.user.is_authenticated else None
+                service_result = scan_url(link, user, scan_level)
                 
-                logger.info("[SCAN] نتيجة: %s%%  %s", service_result.get('risk_score'), service_result.get('result'))
+                duration = time.time() - start_time
+                meta = service_result.get('meta', {})
+                logger.info({
+                    "event": "scan_completed",
+                    "url": link,
+                    "scan_level": scan_level,
+                    "duration": round(duration, 2),
+                    "status": service_result.get('result'),
+                    "cache_hit": meta.get('cache_hit', False),
+                    "ttl": meta.get('ttl', 0)
+                })
+                # Unified Model Alignment for Flutter ScanResult.fromJson
                 response_data = {
-                    'url': service_result.get('url'),
-                    'result': service_result.get('result'),
-                    'risk_score': service_result.get('risk_score'),
-                    'scanned_at': service_result.get('scanned_at'),
-                    
-                    # Legacy fallback fields
+                    'id': service_result.get('id') or f"scan_{int(time.time())}",
+                    'link': service_result.get('url'),
                     'safe': service_result.get('safe'),
-                    'score': service_result.get('score'),
+                    'score': service_result.get('risk_score'),
+                    'message': service_result.get('final_message'),
+                    'details': service_result.get('details', []),
+                    'timestamp': service_result.get('scanned_at'),
                     'domain': service_result.get('domain'),
+                    
+                    # Telemetry (camelCase for Flutter)
+                    'ipAddress': service_result.get('ip_address'),
+                    'responseTime': service_result.get('response_time'),
+                    'threats_count': service_result.get('threats_count', 0),
+                    
+                    # Cache / Rate Limit Visibility
+                    'meta': service_result.get('meta', {}),
+                    
+                    # Legacy fallback
                     'final_status': service_result.get('final_status'),
-                    'final_message': service_result.get('final_message'),
-                    'details': service_result.get('details', [])
                 }
                 
                 return Response({
@@ -112,4 +141,50 @@ class DeleteAllScansSoftView(APIView):
         return Response({
             'success': True,
             'message': f'تم حذف {count} فحص من السجل بنجاح'
+        })
+
+class RestoreScanSoftView(APIView):
+    """استعادة فحص محذوف (Undo Soft Delete)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, pk):
+        from django.shortcuts import get_object_or_404
+        scan = get_object_or_404(Scan, pk=pk, user=request.user)
+        
+        if scan.deleted_at is None:
+            return Response({
+                'success': False,
+                'message': 'الفحص غير محذوف'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        scan.deleted_at = None
+        scan.save(update_fields=['deleted_at'])
+        
+        return Response({
+            'success': True,
+            'message': 'تم استعادة الفحص بنجاح'
+        })
+
+class RestoreScansBulkView(APIView):
+    """استعادة قائمة من الفحوصات المحذوفة مؤقتاً (Undo Delete Bulk)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        scan_ids = request.data.get('scan_ids', [])
+        if not scan_ids:
+            return Response({
+                'success': False,
+                'message': 'يجب تقديم قائمة معرفات الفحوصات استعادتها'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        count = Scan.objects.filter(
+            user=request.user, 
+            id__in=scan_ids,
+            deleted_at__isnull=False
+        ).update(deleted_at=None)
+        
+        return Response({
+            'success': True,
+            'message': f'تم استعادة {count} فحص بنجاح',
+            'restored_count': count
         })

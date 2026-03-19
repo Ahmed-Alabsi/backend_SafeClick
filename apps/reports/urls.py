@@ -17,4 +17,6 @@ urlpatterns = [
     # حذف البلاغات (Soft Delete)
     path('<uuid:pk>/delete-soft/', views.DeleteReportSoftView.as_view(), name='report-delete-soft'),
     path('clear-all-soft/', views.DeleteAllReportsSoftView.as_view(), name='report-clear-all-soft'),
+    path('<uuid:pk>/restore/', views.RestoreReportSoftView.as_view(), name='report-restore-soft'),
+    path('restore-bulk-soft/', views.RestoreReportsBulkView.as_view(), name='report-restore-bulk-soft'),
 ]

@@ -19,6 +19,11 @@ class ScanResultSerializer(serializers.ModelSerializer):
         if isinstance(data.get('details'), list):
             data['details'] = [str(d) for d in data['details']]
         
+        # Flutter Model Alignment
+        data['ipAddress'] = data.get('ip_address')
+        data['responseTime'] = data.get('response_time')
+        data['timestamp'] = data.get('created_at')
+        
         # إضافة الحالة النصية
         if data['safe'] == True:
             data['status_text'] = 'آمن'
@@ -35,6 +40,7 @@ class ScanResultSerializer(serializers.ModelSerializer):
 
 class ScanLinkSerializer(serializers.Serializer):
     link = serializers.URLField(required=True)
+    scan_level = serializers.ChoiceField(choices=['basic', 'standard', 'deep'], default='deep', required=False)
     def validate_link(self, value):
         from apps.common.url_validator import validate_safe_url
         return validate_safe_url(value)

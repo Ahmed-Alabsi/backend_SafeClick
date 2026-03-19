@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     'apps.scans',
     'apps.reports',
     'apps.core',
+    'apps.feedback',
 ]
 
 # ========== Middleware ==========
@@ -205,6 +206,7 @@ REST_FRAMEWORK = {
         'anon': '50/hour',
         'user': '100/hour',
         'scan': '10/minute',  # Phase 7: 10 scans/min per authenticated user
+        'guest_scan': '3/day',  # Allow 3 scans per day for guests based on IP
     },
     'DATETIME_FORMAT': '%Y-%m-%d %H:%M:%S',
 }

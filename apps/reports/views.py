@@ -317,5 +317,51 @@ class DeleteAllReportsSoftView(APIView):
         
         return Response({
             'success': True,
-            'message': f'?? ??? {count} ???? ?? ????? ?????'
+            'message': f'تم حذف {count} بلاغ من السجل بنجاح'
+        })
+
+class RestoreReportSoftView(APIView):
+    """استعادة بلاغ محذوف (Undo Soft Delete)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, pk):
+        from django.shortcuts import get_object_or_404
+        report = get_object_or_404(Report, pk=pk, user=request.user)
+        
+        if report.deleted_at is None:
+            return Response({
+                'success': False,
+                'message': 'البلاغ غير محذوف'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        report.deleted_at = None
+        report.save(update_fields=['deleted_at'])
+        
+        return Response({
+            'success': True,
+            'message': 'تم استعادة البلاغ بنجاح'
+        })
+
+class RestoreReportsBulkView(APIView):
+    """استعادة قائمة من البلاغات المحذوفة مؤقتاً (Undo Delete Bulk)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        report_ids = request.data.get('report_ids', [])
+        if not report_ids:
+            return Response({
+                'success': False,
+                'message': 'يجب تقديم قائمة معرفات البلاغات لاستعادتها'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        count = Report.objects.filter(
+            user=request.user, 
+            id__in=report_ids,
+            deleted_at__isnull=False
+        ).update(deleted_at=None)
+        
+        return Response({
+            'success': True,
+            'message': f'تم استعادة {count} بلاغ بنجاح',
+            'restored_count': count
         })
