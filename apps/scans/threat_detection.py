@@ -1,39 +1,21 @@
-# apps/scans/threat_detection.py
-#
-# PHASE 1 FIX: External API timeouts reduced from 5s → 2.5s per service.
-# PHASE 3 FIX: Graceful degradation — individual check failures do NOT fail
-#              the whole scan. Each check returns a partial result independently.
-# SECURITY FIX: SSL check gracefully handles connection errors (no crash).
-# BUG FIX:  VirusTotal polling (5×3s=15s) was killed by the 4s executor
-#           FUTURES_TIMEOUT. VT now runs on the calling thread with its own
-#           30-second budget; SSL + local blacklist run concurrently in the
-#           pool within a 6-second window.
-
-import re
 import socket
 import requests
-from urllib.parse import urlparse
-import tldextract
-import hashlib
 import logging
-from django.conf import settings
+import time
+import base64
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
-import datetime
+from django.conf import settings
+import tldextract
 
 logger = logging.getLogger(__name__)
 
-# How long to allow each fast local check (blacklist DB + SSL)
-FAST_CHECK_TIMEOUT = 2.5
-# How long to wait for SSL + blacklist futures to complete
-FAST_FUTURES_TIMEOUT = 6.0
-# VirusTotal: max total time for submit + poll cycle (seconds)
-VT_TOTAL_TIMEOUT = 30.0
-# Keep alias so old references in _check_ssl_certificate still compile
-EXTERNAL_CHECK_TIMEOUT = FAST_CHECK_TIMEOUT
-
+# Global executor pool to avoid "wait at exit" overhead (Shared across instances)
+# Increased max_workers to 64 to handle Deep scans under load
+_executor = ThreadPoolExecutor(max_workers=64)
 
 class ThreatDetector:
-    """محرك الكشف عن التهديدات في الروابط (Optimized)"""
+    """محرك الكشف عن التهديدات - تنبيه: يعتمد كلياً على المصادر الخارجية (GSB/VT) بناءً على طلب المستخدم"""
 
     def __init__(self):
         self.results = {
@@ -43,105 +25,104 @@ class ThreatDetector:
             'threats_found': [],
             'domain_info': {},
             'ip_info': {},
+            'ip_address': None,
+            'response_time': 0.0,
+            'domain': '',
+            'full_url': '',
+            'threats_count': 0,
+            'final_status': 'unknown',
+            'final_message': 'جاري الفحص...',
+            'scan_failed': False, # Flag to indicate if both APIs failed
         }
 
-        # Trusted domains — instant safe result, skip external checks
-        self.trusted_domains = [
-            'google.com', 'facebook.com', 'twitter.com', 'youtube.com',
-            'linkedin.com', 'github.com', 'microsoft.com', 'apple.com',
-            'instagram.com', 'whatsapp.com', 'amazon.com',
-        ]
+    SCAN_CONFIG = {
+        'basic': {
+            'services': ['gsb'],
+            'overall_timeout': 7.0,
+            'gsb_timeout': 3.0,
+        },
+        'standard': {
+            'services': ['vt'],
+            'overall_timeout': 10.0,
+            'vt_timeout': 8.0,
+        },
+        'deep': {
+            'services': ['gsb', 'vt'],
+            'overall_timeout': 15.0,
+            'gsb_timeout': 3.0,
+            'vt_timeout': 12.0,
+        }
+    }
 
-        # Suspicious TLDs — add penalty to score
-        self.suspicious_tlds = [
-            'xyz', 'top', 'work', 'date', 'racing', 'gdn', 'mom',
-            'loan', 'download', 'review', 'trade', 'webcam', 'click',
-            'online', 'site', 'website', 'space', 'tk', 'ml', 'ga', 'cf',
-        ]
-
-    def detect(self, url: str) -> dict:
-        """Run threat detection with a strict time budget."""
-        logger.info(f"[ThreatDetector] Starting scan: {url[:80]}")
+    def detect(self, url: str, scan_level: str = 'deep') -> dict:
+        """Run threat detection strictly using external GSB and VT lookups."""
+        logger.info(f"[ThreatDetector] Starting EXTERNAL scan: {url[:80]}")
         url = self._normalize_url(url)
+        start_time = time.time()
 
         try:
             extracted = tldextract.extract(url)
-            full_domain = (
-                f"{extracted.domain}.{extracted.suffix}"
-                if extracted.suffix
-                else extracted.domain
-            )
+            full_domain = f"{extracted.domain}.{extracted.suffix}" if extracted.suffix else extracted.domain
         except Exception:
-            full_domain = url
+            full_domain = urlparse(url).netloc
 
         self.results['domain'] = full_domain
         self.results['full_url'] = url
 
-        # Fast path: trusted domain
-        if full_domain in self.trusted_domains:
-            logger.info(f"[ThreatDetector] Trusted domain: {full_domain}")
-            self.results['safe'] = True
-            self.results['score'] = 100
-            self.results['final_status'] = 'آمن'
-            self.results['final_message'] = '✓ هذا الرابط آمن (نطاق موثوق)'
-            self.results['details'] = ['✓ نطاق موثوق']
-            return self.results
+        # IP Resolution (for telemetry)
+        try:
+            hostname = urlparse(url).netloc or full_domain
+            if ':' in hostname: hostname = hostname.split(':')[0]
+            self.results['ip_address'] = socket.gethostbyname(hostname)
+        except Exception:
+            pass
 
-        # ── Phase 1: Fast local checks (blacklist DB + SSL) run concurrently ──
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            fast_futures = {
-                executor.submit(self._check_local_blacklist, url, full_domain): 'blacklist',
-                executor.submit(self._check_ssl_certificate, url): 'ssl',
-            }
-            try:
-                for future in as_completed(fast_futures, timeout=FAST_FUTURES_TIMEOUT):
-                    check_name = fast_futures[future]
-                    try:
-                        result = future.result(timeout=FAST_CHECK_TIMEOUT)
-                        if result:
-                            self._process_check_result(check_name, result)
-                    except FuturesTimeout:
-                        logger.warning(f"[ThreatDetector] Check '{check_name}' timed out — skipping")
-                    except Exception as e:
-                        logger.warning(f"[ThreatDetector] Check '{check_name}' error: {e} — skipping")
-            except FuturesTimeout:
-                logger.warning("[ThreatDetector] Fast checks pool timed out")
-
-        # ── Phase 2: VirusTotal deep scan (runs on calling thread, own budget) ──
+        # Configuration
+        if scan_level not in self.SCAN_CONFIG:
+            scan_level = 'deep'
+        config = self.SCAN_CONFIG[scan_level]
+        
         vt_key = getattr(settings, 'VIRUSTOTAL_API_KEY', '')
         gsb_key = getattr(settings, 'GOOGLE_SAFE_BROWSING_API_KEY', '')
 
-        if not vt_key:
-            # No API key — cannot perform deep scan
-            raise Exception("تعذر الفحص الشامل: مفتاح VirusTotal API غير مهيأ.")
+        if not vt_key and not gsb_key:
+             self.results['scan_failed'] = True
+             self.results['details'].append("⚠️ خطأ في النظام: لا توجد مفاتيح API لخدمات الفحص")
+             self._calculate_final_score()
+             return self.results
+
+        futures_map = {}
+        if 'gsb' in config['services'] and gsb_key:
+            futures_map[_executor.submit(self._check_google_safe_browsing, url, config.get('gsb_timeout', 3.0))] = 'google_safe'
+        if 'vt' in config['services'] and vt_key:
+            futures_map[_executor.submit(self._check_virustotal, url, config.get('vt_timeout', 15.0))] = 'virustotal'
 
         try:
-            vt_threats = self._check_virustotal(url)
-            for threat in vt_threats:
-                if threat not in self.results['threats_found']:
-                    self.results['threats_found'].append(threat)
-        except Exception as e:
-            logger.error(f"[ThreatDetector] VT error: {e}")
-            raise Exception(f"فشل الفحص العميق عبر VirusTotal: {str(e)}")
+            for future in as_completed(futures_map, timeout=config['overall_timeout']):
+                check_name = futures_map[future]
+                try:
+                    threats = future.result()
+                    if threats and isinstance(threats, list):
+                        for threat in threats:
+                            if threat not in self.results['threats_found']:
+                                self.results['threats_found'].append(threat)
+                except Exception as e:
+                    logger.warning(f"[ThreatDetector] service '{check_name}' error: {e}")
+                    if check_name == 'virustotal':
+                        self.results['details'].append('⚠️ خدمة VirusTotal لم ترد في الوقت المحدد')
+        except FuturesTimeout:
+            logger.warning("[ThreatDetector] Overall scan timeout.")
+            self.results['scan_failed'] = True
 
-        # ── Phase 3: Google Safe Browsing (optional, fast) ──────────────────────
-        if gsb_key:
-            try:
-                gsb_threats = self._check_google_safe_browsing(url)
-                for threat in gsb_threats:
-                    if threat not in self.results['threats_found']:
-                        self.results['threats_found'].append(threat)
-            except Exception as e:
-                logger.warning(f"[ThreatDetector] GSB error: {e}")
+        # Check if both APIs failed completely
+        if not self.results['threats_found'] and not any(isinstance(r, list) for r in futures_map):
+             # If mapping was empty or all crashed
+             if len(self.results['details']) > 0 and '⚠️' in str(self.results['details']):
+                 self.results['scan_failed'] = True
 
         self._calculate_final_score()
-        logger.info(
-            f"[ThreatDetector] Done: score={self.results.get('score')} "
-            f"status={self.results.get('final_status')}"
-        )
+        self.results['response_time'] = round(time.time() - start_time, 2)
         return self.results
-
-    # ── Private helpers ────────────────────────────────────────────────────────
 
     def _normalize_url(self, url: str) -> str:
         url = url.strip()
@@ -149,34 +130,10 @@ class ThreatDetector:
             url = 'https://' + url
         return url
 
-    def _check_local_blacklist(self, url: str, domain: str) -> dict:
-        """Check local Blacklist table only (fast DB lookup — no external calls)."""
-        threats = []
+    def _check_google_safe_browsing(self, url: str, timeout: float) -> list:
+        """GSB Lookup."""
         try:
-            from apps.scans.models import Blacklist
-            if (
-                Blacklist.objects.filter(link=url).exists()
-                or Blacklist.objects.filter(domain=domain).exists()
-            ):
-                threats.append({
-                    'type': 'blacklist',
-                    'severity': 5,
-                    'description': 'الرابط محظور',
-                })
-                self.results['details'].append('⚠️ الرابط محظور (قائمة محلية)')
-            else:
-                self.results['details'].append('✓ الرابط غير محظور محلياً')
-        except Exception as e:
-            logger.warning(f"[ThreatDetector] Blacklist DB error: {e}")
-        return {'threats': threats}
-
-    def _check_google_safe_browsing(self, url: str) -> list:
-        """Google Safe Browsing API — max 2.5s."""
-        try:
-            api_url = (
-                f"https://safebrowsing.googleapis.com/v4/threatMatches:find"
-                f"?key={settings.GOOGLE_SAFE_BROWSING_API_KEY}"
-            )
+            api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={settings.GOOGLE_SAFE_BROWSING_API_KEY}"
             payload = {
                 "client": {"clientId": "safeclick", "clientVersion": "1.0.0"},
                 "threatInfo": {
@@ -186,223 +143,109 @@ class ThreatDetector:
                     "threatEntries": [{"url": url}],
                 },
             }
-            response = requests.post(api_url, json=payload, timeout=EXTERNAL_CHECK_TIMEOUT)
-            if response.status_code == 200:
-                data = response.json()
-                return [
-                    {'type': 'google_safe', 'severity': 5, 'description': 'تهديد من Google'}
-                    for _ in data.get('matches', [])
-                ]
-        except Exception:
-            pass
+            resp = requests.post(api_url, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    matches = data.get('matches', [])
+                    return [{'type': 'google_safe', 'severity': 5, 'description': 'تم رصده كتهديد من قبل Google Safe Browsing'}] if matches else []
+                except ValueError:
+                    logger.error("[GSB] Invalid JSON response")
+        except Exception as e:
+            logger.error(f"[GSB] Connection error: {e}")
         return []
 
-    def _check_virustotal(self, url: str) -> list:
-        """
-        VirusTotal API — Submit URL then poll for a completed analysis.
-
-        Flow:
-          1. POST /urls  → get analysis_id
-          2. Poll GET /analyses/{id} up to 8 times (24s max) for 'completed'
-          3. If still pending / POST failed → GET cached result by URL hash
-          4. Parse last_analysis_stats and return threat list
-        """
-        import time
+    def _check_virustotal(self, url: str, request_timeout: float) -> list:
+        """VT Lookup with budget-aware polling."""
         headers = {"x-apikey": settings.VIRUSTOTAL_API_KEY, "accept": "application/json"}
+        start_time = time.time()
         data = None
 
         try:
-            # Step 1: Submit URL for scanning
-            post_response = requests.post(
-                "https://www.virustotal.com/api/v3/urls",
-                data={"url": url},
-                headers=headers,
-                timeout=10.0,
-            )
-            logger.info(f"[VT] POST status: {post_response.status_code}")
+            # 1. Submit
+            try:
+                 post_resp = requests.post("https://www.virustotal.com/api/v3/urls", data={"url": url}, headers=headers, timeout=5.0)
+            except Exception as e:
+                 logger.error(f"[VT] POST failed: {e}")
+                 post_resp = None
 
-            if post_response.status_code in (200, 202):
-                analysis_id = post_response.json().get('data', {}).get('id')
+            if post_resp and post_resp.status_code in (200, 202):
+                try:
+                    analysis_id = post_resp.json().get('data', {}).get('id')
+                except ValueError:
+                    analysis_id = None
+                
                 if analysis_id:
-                    # Step 2: Poll up to 8 times with 3-second intervals (24s max)
-                    for attempt in range(8):
-                        time.sleep(3)
-                        poll_resp = requests.get(
-                            f"https://www.virustotal.com/api/v3/analyses/{analysis_id}",
-                            headers=headers,
-                            timeout=10.0,
-                        )
-                        if poll_resp.status_code == 200:
-                            poll_data = poll_resp.json()
-                            vt_status = poll_data.get('data', {}).get('attributes', {}).get('status')
-                            logger.info(f"[VT] Poll attempt {attempt+1}: status={vt_status}")
-                            if vt_status == 'completed':
-                                data = poll_data
-                                break
+                    # 2. Poll (Optimized: check every 2 seconds)
+                    for _ in range(10):
+                        if (time.time() - start_time) + 2.0 > request_timeout: break
+                        time.sleep(2)
+                        try:
+                            poll_resp = requests.get(f"https://www.virustotal.com/api/v3/analyses/{analysis_id}", headers=headers, timeout=5.0)
+                            if poll_resp.status_code == 200:
+                                poll_data = poll_resp.json()
+                                if poll_data.get('data', {}).get('attributes', {}).get('status') == 'completed':
+                                    data = poll_data
+                                    break
+                        except Exception as e:
+                            logger.error(f"[VT] Poll error: {e}")
 
-            # Step 3: Fallback — GET cached result by SHA-256 URL ID
+            # 3. Cache Fallback
             if not data:
-                logger.info("[VT] Falling back to cached GET by URL hash")
-                import base64
                 url_id = base64.urlsafe_b64encode(url.encode()).decode().rstrip('=')
-                get_response = requests.get(
-                    f"https://www.virustotal.com/api/v3/urls/{url_id}",
-                    headers=headers,
-                    timeout=10.0,
-                )
-                logger.info(f"[VT] Hash GET status: {get_response.status_code}")
-                if get_response.status_code == 200:
-                    data = get_response.json()
-                elif get_response.status_code == 404:
-                    # URL has never been scanned — no result available
-                    raise Exception("VirusTotal: لا توجد بيانات سابقة للرابط، ولم يكتمل الفحص الجديد في الوقت المحدد.")
+                try:
+                    get_resp = requests.get(f"https://www.virustotal.com/api/v3/urls/{url_id}", headers=headers, timeout=5.0)
+                    if get_resp.status_code == 200:
+                        data = get_resp.json()
+                except Exception as e:
+                    logger.error(f"[VT] GET fallback error: {e}")
+
+            if data:
+                stats = data.get('data', {}).get('attributes', {}).get('last_analysis_stats', {})
+                malicious = stats.get('malicious', 0)
+                suspicious = stats.get('suspicious', 0)
+                total = sum(stats.values())
+                
+                if malicious > 0:
+                    self.results['details'].append(f"⚠️ VirusTotal: {malicious} محرك رصد تهديداً ({total})")
+                    return [{'type': 'virustotal', 'severity': 5, 'description': f'تم اكتشاف الرابط كملغم من {malicious} محرك في VirusTotal'}]
+                elif suspicious > 0:
+                    self.results['details'].append(f"⚠️ VirusTotal: {suspicious} محرك اشتبه بالرابط ({total})")
+                    return [{'type': 'virustotal', 'severity': 3, 'description': f'اشتباه في الرابط من قبل {suspicious} محرك في VirusTotal'}]
                 else:
-                    raise Exception(f"VirusTotal API أعاد كود غير متوقع: {get_response.status_code}")
-
-            # Step 4: Parse analysis stats
-            attributes = data.get('data', {}).get('attributes', {})
-            # Completed analysis stores results under 'stats' or 'last_analysis_stats'
-            stats = attributes.get('stats') or attributes.get('last_analysis_stats', {})
-
-            malicious  = stats.get('malicious', 0)
-            suspicious = stats.get('suspicious', 0)
-            undetected = stats.get('undetected', 0)
-            harmless   = stats.get('harmless', 0)
-            total_engines = malicious + suspicious + undetected + harmless
-
-            logger.info(
-                f"[VT] Results — malicious={malicious} suspicious={suspicious} "
-                f"undetected={undetected} harmless={harmless} total={total_engines}"
-            )
-
-            if total_engines == 0:
-                raise Exception("VirusTotal: لم يتم توفير نتائج فحص من المحركات لهذا الرابط.")
-
-            if malicious > 0 or suspicious > 0:
-                self.results['details'].append(
-                    f'⚠️ VirusTotal: {malicious} محرك رصد تهديداً من أصل {total_engines}'
-                )
-                return [{
-                    'type': 'virustotal',
-                    'severity': 5,
-                    'description': f'{malicious} محرك يشتبه بالرابط (من {total_engines})',
-                    'source': 'VirusTotal',
-                    'malicious': malicious,
-                    'suspicious': suspicious,
-                }]
-            else:
-                self.results['details'].append(
-                    f'✅ VirusTotal: الرابط نظيف ({harmless} محرك أكد الأمان من {total_engines})'
-                )
-                return []
-
+                    self.results['details'].append(f"✅ VirusTotal: الرابط نظيف (أكده {stats.get('harmless', 0)} محرك)")
         except Exception as e:
-            raise Exception(f"خطأ في الاتصال بـ VirusTotal: {e}")
-
-    def _check_ssl_certificate(self, url: str) -> dict:
-        """SSL certificate check with strict 2.5s socket timeout."""
-        threats = []
-        score_impact = 0
-
-        if not url.startswith('https://'):
-            score_impact += 10
-            self.results['details'].append('⚠️ الرابط لا يستخدم HTTPS')
-            return {'threats': threats, 'score_impact': score_impact}
-
-        try:
-            import ssl
-            from datetime import datetime as dt
-
-            hostname = urlparse(url).netloc
-            if ':' in hostname:
-                hostname = hostname.split(':')[0]
-
-            ctx = ssl.create_default_context()
-            with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
-                s.settimeout(EXTERNAL_CHECK_TIMEOUT)
-                s.connect((hostname, 443))
-                cert = s.getpeercert()
-
-            if cert and 'notAfter' in cert:
-                expiry = dt.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z')
-                days = (expiry - dt.now()).days
-                if days < 0:
-                    threats.append({'type': 'expired_ssl', 'severity': 4, 'description': 'شهادة منتهية'})
-                    self.results['details'].append('⚠️ شهادة SSL منتهية')
-                    score_impact += 20
-                elif days < 7:
-                    threats.append({'type': 'expiring_ssl', 'severity': 2, 'description': 'شهادة قريبة الانتهاء'})
-                    self.results['details'].append('⚠️ شهادة SSL تنتهي قريباً')
-                    score_impact += 5
-                else:
-                    self.results['details'].append('✓ شهادة SSL صالحة')
-        except socket.timeout:
-            self.results['details'].append('⚠️ انتهت مهلة التحقق من SSL')
-            score_impact += 5
-        except Exception:
-            self.results['details'].append('⚠️ لا يمكن التحقق من SSL')
-            score_impact += 5
-
-        return {'threats': threats, 'score_impact': score_impact}
-
-    def _process_check_result(self, check_name: str, result: dict) -> None:
-        if not result:
-            return
-        for threat in result.get('threats', []):
-            if threat not in self.results['threats_found']:
-                self.results['threats_found'].append(threat)
-        self.results['score'] += result.get('score_impact', 0)
+            logger.error(f"[VT] Error: {e}")
+        return []
 
     def _calculate_final_score(self) -> None:
-        threat_count = len(self.results['threats_found'])
-        total_severity = sum(t.get('severity', 1) for t in self.results['threats_found'])
-
-        base_score = 100
-
-        # Check for critical threats (VirusTotal malicious, Google Safe Browsing, Blacklist)
-        has_critical_threat = any(
-            t.get('type') in ['virustotal', 'google_safe', 'blacklist'] and t.get('severity', 0) >= 5
-            for t in self.results['threats_found']
-        )
+        """Final decision based ONLY on threats found by external services."""
+        threats = self.results['threats_found']
+        self.results['threats_count'] = len(threats)
         
-        # Check for suspicious but non-critical threats
-        has_suspicious_threat = any(
-            t.get('type') == 'virustotal' and t.get('suspicious', 0) > 0 and t.get('malicious', 0) == 0
-            for t in self.results['threats_found']
-        )
-
-        if threat_count > 0:
-            # More aggressive penalty: severity * 10
-            base_score -= min(90, total_severity * 10)
-
-        final_score = max(0, min(100, base_score - self.results.get('score', 0)))
-        
-        # Hard limits based on threat type to prevent incorrect categorization
-        if has_critical_threat:
-            final_score = min(final_score, 35) # Force into "Dangerous" category (< 40)
-        elif has_suspicious_threat:
-            final_score = min(final_score, 65) # Force into "Suspicious" category (< 70)
-
-        self.results['score'] = final_score
-
-        if final_score >= 70:
+        if self.results.get('scan_failed'):
+            self.results['score'] = 0
+            self.results['safe'] = None
+            self.results['final_status'] = 'فشل الفحص'
+            self.results['final_message'] = '⚠️ تعذر إكمال الفحص'
+            if not self.results['details']:
+                self.results['details'] = ['⚠️ تعذر الاتصال بمصادر الفحص الخارجية']
+        elif not threats:
+            self.results['score'] = 100
             self.results['safe'] = True
             self.results['final_status'] = 'آمن'
-            self.results['final_message'] = '✓ هذا الرابط آمن'
+            self.results['final_message'] = '✓ نتيحة الفحص: الرابط آمن'
             if not self.results['details']:
-                self.results['details'] = ['✓ الرابط آمن']
-        elif final_score >= 40:
-            self.results['safe'] = None
-            self.results['final_status'] = 'مشبوه'
-            self.results['final_message'] = '⚠️ هذا الرابط مشبوه، يرجى الحذر'
-            if '⚠️' not in str(self.results['details']):
-                self.results['details'].insert(0, '⚠️ الرابط مشبوه')
+                self.results['details'] = ['✓ المصادر الخارجية لم تعثر على أي تهديدات']
         else:
-            self.results['safe'] = False
-            self.results['final_status'] = 'خطير'
-            self.results['final_message'] = '🔴 هذا الرابط خطير! تجنب فتحه'
-            if '🔴' not in str(self.results['details']):
-                self.results['details'].insert(0, '🔴 تحذير: رابط خطير')
-
-        self.results['threats_count'] = len(self.results['threats_found'])
-        logger.info(f"[ThreatDetector] Final: {final_score}% — {self.results['final_status']}")
+            max_severity = max(t.get('severity', 0) for t in threats)
+            if max_severity >= 5:
+                self.results['score'] = 10
+                self.results['safe'] = False
+                self.results['final_status'] = 'خطير'
+                self.results['final_message'] = '🔴 تحذير: هذا الرابط خطير جداً!'
+            else:
+                self.results['score'] = 45
+                self.results['safe'] = None
+                self.results['final_status'] = 'مشبوه'
+                self.results['final_message'] = '⚠️ تنبيه: تم رصد مؤشرات مشبوهة'
