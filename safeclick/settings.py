@@ -90,7 +90,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.getenv('safeclick_db', 'safeclick_db'),
         'USER': os.getenv('safeclick_user', 'safeclick_user'),
-        'PASSWORD': os.getenv('salah', 'salah'),
+        'PASSWORD': os.getenv('123456', '123456'),
         'HOST': os.getenv('localhost', 'localhost'),
         'PORT': os.getenv('5432', '5432'),
     }
@@ -239,16 +239,16 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://192.168.8.110:3000",
-    "http://192.168.8.110:8000",
+    "http://192.168.8.122:3000",
+    "http://192.168.8.122:8000",
 ]
 
 # ========== CSRF Settings ==========
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://192.168.8.110:3000",
-    "http://192.168.8.110:8000",
+    "http://192.168.8.122:3000",
+    "http://192.168.8.122:8000",
 ]
 
 # ========== API Keys ==========
@@ -362,7 +362,7 @@ JAZZMIN_UI_TWEAKS = {
     "sidebar_nav_legacy_style": False,
     "sidebar_nav_flat_style": False,
     "theme": "darkly", # A modern dark theme that fits security apps
-    "dark_mode_theme": "darkly",
+    "default_theme_mode": "auto",
     "button_classes": {
         "primary": "btn-outline-primary",
         "secondary": "btn-outline-secondary",

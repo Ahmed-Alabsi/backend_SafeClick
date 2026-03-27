@@ -1,5 +1,6 @@
 # apps/accounts/serializers.py
 from rest_framework import serializers
+from django.contrib.auth import authenticate
 from .models import User
 
 class UserSerializer(serializers.ModelSerializer):
@@ -35,9 +36,58 @@ class RegisterSerializer(serializers.ModelSerializer):
         )
         return user
 
+# ✅ LoginSerializer المعدل بشكل صحيح لدعم تسجيل الدخول بالبريد الإلكتروني أو اسم المستخدم
 class LoginSerializer(serializers.Serializer):
-    username = serializers.CharField()
+    username = serializers.CharField(required=False, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
     password = serializers.CharField()
+
+    def validate(self, attrs):
+        username = attrs.get('username', '').strip()
+        email = attrs.get('email', '').strip()
+        password = attrs.get('password')
+
+        # التأكد من وجود إما username أو email
+        if not username and not email:
+            raise serializers.ValidationError("يجب إدخال اسم المستخدم أو البريد الإلكتروني")
+
+        user = None
+        
+        # إذا تم إدخال بريد إلكتروني
+        if email:
+            try:
+                # البحث عن المستخدم بالبريد الإلكتروني
+                user = User.objects.get(email=email)
+                # المصادقة باستخدام البريد الإلكتروني (لأن USERNAME_FIELD = 'email')
+                authenticated_user = authenticate(username=email, password=password)
+                
+                if authenticated_user and authenticated_user.id == user.id:
+                    attrs['user'] = authenticated_user
+                    return attrs
+                else:
+                    raise serializers.ValidationError("البريد الإلكتروني أو كلمة المرور غير صحيحة")
+                    
+            except User.DoesNotExist:
+                raise serializers.ValidationError("البريد الإلكتروني غير صحيح")
+        
+        # إذا تم إدخال اسم المستخدم فقط
+        elif username:
+            try:
+                # البحث عن المستخدم بالاسم
+                user = User.objects.get(name=username)
+                # المصادقة باستخدام البريد الإلكتروني (لأن USERNAME_FIELD = 'email')
+                authenticated_user = authenticate(username=user.email, password=password)
+                
+                if authenticated_user and authenticated_user.id == user.id:
+                    attrs['user'] = authenticated_user
+                    return attrs
+                else:
+                    raise serializers.ValidationError("اسم المستخدم أو كلمة المرور غير صحيحة")
+                    
+            except User.DoesNotExist:
+                raise serializers.ValidationError("اسم المستخدم غير صحيح")
+
+        raise serializers.ValidationError("اسم المستخدم أو البريد الإلكتروني غير صحيح")
 
 class SendOTPSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)

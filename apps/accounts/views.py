@@ -310,35 +310,31 @@ class ResendOTPView(APIView):
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
+# ✅ LoginView المعدل لدعم تسجيل الدخول بالبريد الإلكتروني أو اسم المستخدم
 class LoginView(APIView):
     permission_classes = [AllowAny]
     
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
         if serializer.is_valid():
-            username = serializer.validated_data['username']
-            password = serializer.validated_data['password']
+            user = serializer.validated_data['user']
             
-            try:
-                user = User.objects.get(name=username)
-                if user.check_password(password):
-                    if not user.is_active:
-                        return Response({'success': False, 'message': 'هذا الحساب معطل'}, status=status.HTTP_401_UNAUTHORIZED)
-                    
-                    refresh = RefreshToken.for_user(user)
-                    return Response({
-                        'success': True,
-                        'user': UserSerializer(user).data,
-                        'tokens': {
-                            'access': str(refresh.access_token),
-                            'refresh': str(refresh),
-                        }
-                    })
-                else:
-                    return Response({'success': False, 'message': 'كلمة المرور غير صحيحة'}, status=status.HTTP_401_UNAUTHORIZED)
-            except User.DoesNotExist:
-                return Response({'success': False, 'message': 'المستخدم غير موجود'}, status=status.HTTP_404_NOT_FOUND)
-        return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            refresh = RefreshToken.for_user(user)
+            
+            return Response({
+                'success': True,
+                'user': UserSerializer(user).data,
+                'tokens': {
+                    'access': str(refresh.access_token),
+                    'refresh': str(refresh),
+                }
+            })
+        else:
+            # ✅ إرجاع الأخطاء بشكل صحيح
+            return Response({
+                'success': False,
+                'message': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]
@@ -547,4 +543,4 @@ class GoogleLoginView(APIView):
             return Response({'success': False, 'message': 'التوكن غير صالح أو منتهي الصلاحية'}, status=status.HTTP_401_UNAUTHORIZED)
         except Exception as e:
             logger.error(f"Google Login Error: {e} (IP: {ip})")
-            return Response({'success': False, 'message': 'حدث خطأ غير متوقع'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'success': False, 'message': 'حدث خطأ غير متوقع'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
